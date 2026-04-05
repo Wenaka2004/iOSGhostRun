@@ -44,13 +44,27 @@ h1 { font-size:20px; padding:12px 0; text-align:center; color:#38bdf8; }
 .toggle input[type=checkbox] { width:18px; height:18px; accent-color:#22c55e; }
 .toggle label { font-size:13px; color:#94a3b8; cursor:pointer; }
 
-.route-info { background:#0f172a; border-radius:8px; padding:12px; font-size:13px; color:#94a3b8; }
-.route-info strong { color:#38bdf8; }
-.route-actions { display:flex; gap:8px; margin-top:8px; }
-.route-actions .btn { font-size:12px; padding:6px 12px; flex:none; }
+/* 路线编辑器样式 */
+.route-editor { background:#0f172a; border-radius:8px; padding:12px; }
+.route-input-row { display:flex; gap:8px; margin-bottom:8px; }
+.route-input-row input { flex:1; padding:8px; background:#1e293b; border:1px solid #334155; border-radius:6px; color:#e2e8f0; font-size:14px; }
+.route-input-row input:focus { outline:none; border-color:#38bdf8; }
+.route-input-row input::placeholder { color:#64748b; }
+.route-list { max-height:200px; overflow-y:auto; margin-top:8px; }
+.route-point { display:flex; align-items:center; gap:8px; padding:8px; background:#1e293b; border-radius:6px; margin-bottom:4px; font-size:13px; }
+.route-point .idx { color:#64748b; width:24px; }
+.route-point .coords { flex:1; color:#e2e8f0; }
+.route-point .delete { background:#ef4444; color:#fff; border:none; border-radius:4px; padding:4px 8px; cursor:pointer; font-size:12px; }
+.route-point .delete:hover { background:#dc2626; }
+.route-actions { display:flex; gap:8px; margin-top:12px; flex-wrap:wrap; }
+.route-actions .btn { font-size:12px; padding:8px 16px; flex:none; }
+.btn-add { background:#22c55e; color:#fff; }
 .btn-import { background:#059669; color:#fff; }
 .btn-export { background:#0891b2; color:#fff; }
+.btn-clear { background:#64748b; color:#fff; }
 input[type=file] { display:none; }
+.route-summary { font-size:13px; color:#94a3b8; margin-top:8px; padding-top:8px; border-top:1px solid #334155; }
+.route-summary strong { color:#38bdf8; }
 
 .log-box { max-height:200px; overflow-y:auto; background:#0f172a; border-radius:8px; padding:8px; font-size:11px; font-family:monospace; }
 .log-line { padding:2px 0; border-bottom:1px solid #1e293b; }
@@ -112,12 +126,21 @@ input[type=file] { display:none; }
   </div>
 
   <div class="card">
-    <div class="card-title">路线管理</div>
-    <div class="route-info" id="routeInfo">未加载路线</div>
-    <div class="route-actions">
-      <button class="btn btn-import" onclick="document.getElementById('fileInput').click()">导入 JSON</button>
-      <button class="btn btn-export" onclick="exportRoute()">导出 JSON</button>
-      <input type="file" id="fileInput" accept=".json" onchange="importRoute(event)">
+    <div class="card-title">路线编辑器</div>
+    <div class="route-editor">
+      <div class="route-input-row">
+        <input type="number" id="inputLat" step="0.00001" placeholder="纬度 (如: 39.9042)">
+        <input type="number" id="inputLon" step="0.00001" placeholder="经度 (如: 116.4074)">
+        <button class="btn btn-add" onclick="addRoutePoint()">添加点</button>
+      </div>
+      <div class="route-list" id="routeList"></div>
+      <div class="route-summary" id="routeSummary">未配置路线</div>
+      <div class="route-actions">
+        <button class="btn btn-import" onclick="document.getElementById('fileInput').click()">导入 JSON</button>
+        <button class="btn btn-export" onclick="exportRoute()">导出 JSON</button>
+        <button class="btn btn-clear" onclick="clearRoute()">清空路线</button>
+        <input type="file" id="fileInput" accept=".json" onchange="importRoute(event)">
+      </div>
     </div>
   </div>
 
@@ -140,15 +163,107 @@ function toast(msg) {
   setTimeout(function(){ t.style.display = 'none'; }, 2000);
 }
 
-function updateRouteInfo(pts) {
-  routeCoords = pts || [];
-  var el = document.getElementById('routeInfo');
-  if (routeCoords.length < 2) { el.innerHTML = '未配置路线'; return; }
+function renderRouteList() {
+  var list = document.getElementById('routeList');
+  list.innerHTML = '';
+  routeCoords.forEach(function(p, i) {
+    var div = document.createElement('div');
+    div.className = 'route-point';
+    div.innerHTML = '<span class="idx">#'+(i+1)+'</span><span class="coords">纬度: '+p.lat.toFixed(6)+', 经度: '+p.lon.toFixed(6)+'</span><button class="delete" onclick="deletePoint('+i+')">删除</button>';
+    list.appendChild(div);
+  });
+  updateRouteSummary();
+}
+
+function updateRouteSummary() {
+  var el = document.getElementById('routeSummary');
+  if (routeCoords.length < 2) {
+    el.innerHTML = '已添加 <strong>' + routeCoords.length + '</strong> 个点（至少需要 2 个点）';
+    return;
+  }
   var dist = 0;
   for (var i = 1; i < routeCoords.length; i++) {
     dist += haversine(routeCoords[i-1].lat, routeCoords[i-1].lon, routeCoords[i].lat, routeCoords[i].lon);
   }
-  el.innerHTML = '<strong>' + routeCoords.length + '</strong> 个点，总距离约 <strong>' + (dist*1000).toFixed(0) + '</strong> 米';
+  el.innerHTML = '已添加 <strong>' + routeCoords.length + '</strong> 个点，总距离约 <strong>' + (dist*1000).toFixed(0) + '</strong> 米';
+}
+
+function addRoutePoint() {
+  var lat = parseFloat(document.getElementById('inputLat').value);
+  var lon = parseFloat(document.getElementById('inputLon').value);
+  if (isNaN(lat) || isNaN(lon)) {
+    alert('请输入有效的经纬度');
+    return;
+  }
+  if (lat < -90 || lat > 90) {
+    alert('纬度范围: -90 ~ 90');
+    return;
+  }
+  if (lon < -180 || lon > 180) {
+    alert('经度范围: -180 ~ 180');
+    return;
+  }
+  routeCoords.push({lat: lat, lon: lon});
+  renderRouteList();
+  saveRoute();
+  document.getElementById('inputLat').value = '';
+  document.getElementById('inputLon').value = '';
+  toast('已添加点 #' + routeCoords.length);
+}
+
+function deletePoint(idx) {
+  routeCoords.splice(idx, 1);
+  renderRouteList();
+  saveRoute();
+}
+
+function clearRoute() {
+  if (routeCoords.length === 0) return;
+  if (!confirm('确定清空所有路线点？')) return;
+  routeCoords = [];
+  renderRouteList();
+  saveRoute();
+  toast('已清空路线');
+}
+
+function saveRoute() {
+  fetch('/api/route', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(routeCoords)
+  });
+}
+
+function exportRoute() {
+  if (!routeCoords.length) { alert('没有路线'); return; }
+  var b = new Blob([JSON.stringify(routeCoords,null,2)], {type:'application/json'});
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(b);
+  a.download = 'route.json';
+  a.click();
+}
+
+function importRoute(e) {
+  var f = e.target.files[0];
+  if(!f) return;
+  var r = new FileReader();
+  r.onload = function(ev) {
+    try {
+      var pts = JSON.parse(ev.target.result);
+      if (Array.isArray(pts) && pts.length >= 2 && pts[0].lat !== undefined) {
+        routeCoords = pts;
+        renderRouteList();
+        saveRoute();
+        toast('已导入 ' + pts.length + ' 个路线点');
+      } else {
+        alert('无效的路线文件，格式: [{"lat":xx,"lon":xx}, ...]');
+      }
+    } catch(e) {
+      alert('JSON 解析失败');
+    }
+  };
+  r.readAsText(f);
+  e.target.value = '';
 }
 
 function haversine(lat1,lon1,lat2,lon2) {
@@ -157,39 +272,24 @@ function haversine(lat1,lon1,lat2,lon2) {
   return R*2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a));
 }
 
-function exportRoute() {
-  if (!routeCoords.length) { alert('没有路线'); return; }
-  var b = new Blob([JSON.stringify(routeCoords,null,2)], {type:'application/json'});
-  var a = document.createElement('a'); a.href=URL.createObjectURL(b); a.download='route.json'; a.click();
-}
-
-function importRoute(e) {
-  var f = e.target.files[0]; if(!f) return;
-  var r = new FileReader();
-  r.onload = function(ev) {
-    try {
-      var pts = JSON.parse(ev.target.result);
-      if (Array.isArray(pts) && pts.length>=2 && pts[0].lat!==undefined) {
-        updateRouteInfo(pts);
-        fetch('/api/route',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(pts)})
-        .then(function(){ toast('路线已导入'); });
-      } else { alert('无效的路线文件'); }
-    } catch(e) { alert('JSON 解析失败'); }
-  };
-  r.readAsText(f);
-  e.target.value='';
-}
-
 function saveConfig() {
-  fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
-    speed: parseFloat(document.getElementById('cfgSpeed').value),
-    speedVariance: parseFloat(document.getElementById('cfgVariance').value),
-    routeOffset: parseFloat(document.getElementById('cfgOffset').value),
-    autoStart: document.getElementById('cfgAuto').checked
-  })}).then(function(){ toast('配置已保存'); });
+  fetch('/api/config',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({
+      speed: parseFloat(document.getElementById('cfgSpeed').value),
+      speedVariance: parseFloat(document.getElementById('cfgVariance').value),
+      routeOffset: parseFloat(document.getElementById('cfgOffset').value),
+      autoStart: document.getElementById('cfgAuto').checked
+    })
+  }).then(function(){ toast('配置已保存'); });
 }
 
 function startRun() {
+  if (routeCoords.length < 2) {
+    alert('请先添加至少 2 个路线点');
+    return;
+  }
   fetch('/api/start',{method:'POST'}).then(function(r){
     if(!r.ok) r.text().then(function(t){ alert('启动失败: '+t); });
     else toast('已启动');
@@ -256,7 +356,8 @@ function init() {
     document.getElementById('cfgVariance').value = data.config.speedVariance;
     document.getElementById('cfgOffset').value = data.config.routeOffset;
     document.getElementById('cfgAuto').checked = data.config.autoStart;
-    updateRouteInfo(data.config.route);
+    routeCoords = data.config.route || [];
+    renderRouteList();
     updateState(data.server);
     return fetch('/api/logs');
   }).then(function(r){ return r.json(); }).then(function(logs){
