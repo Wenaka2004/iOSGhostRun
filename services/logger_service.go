@@ -3,8 +3,6 @@ package services
 import (
 	"fmt"
 	"time"
-
-	"github.com/wailsapp/wails/v3/pkg/application"
 )
 
 type LogEntry struct {
@@ -41,8 +39,7 @@ func (l *LoggerService) logMessage(level string, module string, message string) 
 	}
 	fmt.Printf("[%s] [%s] [%s] %s\n", entry.Time, level, module, message)
 
-	// 发送事件到前端
-	application.Get().Event.Emit("log-event", entry)
+	GlobalEvents.Emit("log-event", entry)
 }
 
 // GetLogs 获取所有日志

@@ -57,7 +57,11 @@ func (d *DevicesService) SelectDevice(udid string) error {
 
 	imgSvc := &ImageService{}
 	if err := imgSvc.MountImage(udid); err != nil {
-		return err
+		if IsVersionAbove17(udid) {
+			Log.Warn("DevicesService", "镜像挂载失败（iOS 17+ 可通过隧道工作）: "+err.Error())
+		} else {
+			return err
+		}
 	}
 
 	if IsVersionAbove17(udid) {
@@ -67,7 +71,7 @@ func (d *DevicesService) SelectDevice(udid string) error {
 		}
 	}
 
-	Log.Info("DevicesService", fmt.Sprintf("挂载开发者镜像完成: %s", udid))
+	Log.Info("DevicesService", fmt.Sprintf("设备准备完成: %s", udid))
 	return nil
 }
 

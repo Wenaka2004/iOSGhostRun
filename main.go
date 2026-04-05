@@ -95,6 +95,9 @@ func main() {
 		},
 	})
 
+	// 初始化 Wails 事件分发
+	services.InitWailsEvents()
+
 	app.SetIcon(icon)
 
 	// Create a new window with the necessary options.

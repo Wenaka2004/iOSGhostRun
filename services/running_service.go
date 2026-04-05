@@ -7,8 +7,6 @@ import (
 	"math/rand"
 	"sync"
 	"time"
-
-	"github.com/wailsapp/wails/v3/pkg/application"
 )
 
 // Point 路线点
@@ -70,7 +68,7 @@ func NewRunningService() *RunningService {
 		speed:           8.0,
 		speedVariance:   1.0,
 		routeOffset:     3.0,
-		updateInterval:  100 * time.Millisecond,
+		updateInterval:  1000 * time.Millisecond, // 1秒更新一次，模拟真实GPS频率
 		loopCount:       1,
 		locationService: &LocationService{},
 	}
@@ -165,7 +163,7 @@ func (r *RunningService) SetRandomization(speedVariance, routeOffset float64) {
 func (r *RunningService) SetLoopCount(count int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if count > 0 && count <= 999 {
+	if count >= 0 && count <= 999 {
 		r.loopCount = count
 	}
 }
@@ -212,10 +210,45 @@ func (r *RunningService) GetStatus() RunningStatus {
 	}
 }
 
-// runLoop 跑步循环 - 更精确的速度控制
+// gpsDrift 模拟真实 GPS 信号漂移（±1~2米）
+func gpsDrift() (float64, float64) {
+	driftMeters := 0.5 + rand.Float64()*1.5
+	angle := rand.Float64() * 2 * math.Pi
+	dLat := math.Cos(angle) * driftMeters * 0.000009
+	dLon := math.Sin(angle) * driftMeters * 0.000011
+	return dLat, dLon
+}
+
+// realisticSpeed 模拟真实人类跑步速度变化
+// 真人跑步速度有不规则波动，不是完美的正弦波
+func realisticSpeed(baseSpeed, variance float64, elapsed float64, rng *rand.Rand) float64 {
+	if variance <= 0 {
+		return baseSpeed
+	}
+
+	// 多频率叠加模拟不规则波动：
+	// - 慢波：体力变化（周期约60秒）
+	// - 中波：步频调整（周期约15秒）
+	// - 快波：步态微调（周期约5秒）
+	// - 随机扰动
+	slowWave := math.Sin(elapsed*0.1) * 0.4
+	midWave := math.Sin(elapsed*0.42+1.7) * 0.3
+	fastWave := math.Sin(elapsed*1.26+3.1) * 0.15
+	noise := (rng.Float64()*2 - 1) * 0.15
+
+	variation := (slowWave + midWave + fastWave + noise) * variance
+	speed := baseSpeed + variation
+
+	// 限制最低速度
+	if speed < 1.0 {
+		speed = 1.0
+	}
+	return speed
+}
+
+// runLoop 跑步循环 - 模拟真实GPS更新
 func (r *RunningService) runLoop(ctx context.Context) {
-	ticker := time.NewTicker(r.updateInterval)
-	defer ticker.Stop()
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 
 	pointIndex := 0
 	currentLoop := 1
@@ -224,14 +257,30 @@ func (r *RunningService) runLoop(ctx context.Context) {
 	lastLogTime := time.Now()
 	progress := 0.0
 
+	// GPS 漂移状态：使用缓慢变化的偏移，模拟真实GPS漂移特征
+	var driftLat, driftLon float64
+	var targetDriftLat, targetDriftLon float64
+	targetDriftLat, targetDriftLon = gpsDrift()
+
+	// 路线偏移状态
 	var offsetLat, offsetLon float64
 	lastOffsetUpdateTime := time.Now()
 
+	// 更新间隔在 900ms~1100ms 之间随机波动，模拟真实GPS采样抖动
+	baseInterval := r.updateInterval
+
 	for {
+		// 随机化更新间隔（±100ms），模拟GPS信号采样的不稳定性
+		jitter := time.Duration(rng.Intn(200)-100) * time.Millisecond
+		interval := baseInterval + jitter
+		if interval < 800*time.Millisecond {
+			interval = 800 * time.Millisecond
+		}
+
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-time.After(interval):
 			r.mu.Lock()
 			state := r.state
 			config := r
@@ -253,7 +302,7 @@ func (r *RunningService) runLoop(ctx context.Context) {
 					r.state = StateIdle
 					r.mu.Unlock()
 					Log.Info("RunningService", fmt.Sprintf("跑步完成！总距离: %.0fm, 圈数: %d", totalDistance, currentLoop))
-					application.Get().Event.Emit("running:completed", r.GetStatus())
+					GlobalEvents.Emit("running:completed", r.GetStatus())
 					return
 				}
 				// 开始新的循环
@@ -267,16 +316,9 @@ func (r *RunningService) runLoop(ctx context.Context) {
 			startPoint := route[pointIndex]
 			endPoint := route[pointIndex+1]
 
-			currentSpeed := config.speed
-			if config.speedVariance > 0 {
-				// 使用正弦函数实现速度的平滑波动
-				elapsed := time.Since(r.startTime).Seconds()
-				variation := math.Sin(elapsed*0.5) * config.speedVariance * 0.5
-				currentSpeed += variation
-				if currentSpeed < 0.5 {
-					currentSpeed = 0.5
-				}
-			}
+			// 使用真实感速度变化
+			elapsed := time.Since(r.startTime).Seconds()
+			currentSpeed := realisticSpeed(config.speed, config.speedVariance, elapsed, rng)
 
 			// 计算两点之间的距离
 			segmentDistance := haversine(startPoint.Lat, startPoint.Lon, endPoint.Lat, endPoint.Lon)
@@ -289,7 +331,7 @@ func (r *RunningService) runLoop(ctx context.Context) {
 
 			// 速度 km/h 转换为 km/ms，然后计算这个时间间隔内移动的距离
 			speedKMMS := currentSpeed / (3600 * 1000)
-			moveDistance := speedKMMS * float64(r.updateInterval.Milliseconds())
+			moveDistance := speedKMMS * float64(interval.Milliseconds())
 
 			// 计算进度增量
 			progressIncrement := moveDistance / segmentDistance
@@ -323,20 +365,27 @@ func (r *RunningService) runLoop(ctx context.Context) {
 			currentLat := startPoint.Lat + (endPoint.Lat-startPoint.Lat)*progress
 			currentLon := startPoint.Lon + (endPoint.Lon-startPoint.Lon)*progress
 
-			// 路线偏移：使用缓慢变化的偏移量，而不是每次随机
+			// 路线偏移：使用缓慢变化的偏移量（缩小系数，避免偏离过远）
 			if config.routeOffset > 0 {
-				// 每3秒缓慢更新一次目标偏移量
-				if time.Since(lastOffsetUpdateTime) > 3*time.Second {
-					targetOffsetLat := (rand.Float64()*2 - 1) * config.routeOffset * 0.00001
-					targetOffsetLon := (rand.Float64()*2 - 1) * config.routeOffset * 0.00001
-					// 平滑过渡到新偏移
-					offsetLat = offsetLat*0.7 + targetOffsetLat*0.3
-					offsetLon = offsetLon*0.7 + targetOffsetLon*0.3
+				if time.Since(lastOffsetUpdateTime) > 5*time.Second {
+					targetOffsetLat := (rng.Float64()*2 - 1) * config.routeOffset * 0.000003
+					targetOffsetLon := (rng.Float64()*2 - 1) * config.routeOffset * 0.000003
+					offsetLat = offsetLat*0.8 + targetOffsetLat*0.2
+					offsetLon = offsetLon*0.8 + targetOffsetLon*0.2
 					lastOffsetUpdateTime = time.Now()
 				}
 				currentLat += offsetLat
 				currentLon += offsetLon
 			}
+
+			// GPS 漂移：缓慢向目标漂移值过渡，每5秒生成新的目标
+			driftLat = driftLat*0.85 + targetDriftLat*0.15
+			driftLon = driftLon*0.85 + targetDriftLon*0.15
+			if rng.Intn(5) == 0 { // 平均每5次更新（5秒）生成新漂移目标
+				targetDriftLat, targetDriftLon = gpsDrift()
+			}
+			currentLat += driftLat
+			currentLon += driftLon
 
 			currentPoint := Point{
 				Lat: currentLat,
@@ -351,11 +400,19 @@ func (r *RunningService) runLoop(ctx context.Context) {
 			}
 			lastPos = currentPoint
 
-			// 设置位置
-			err := r.locationService.SetLocation(config.udid, currentPoint.Lat, currentPoint.Lon)
-			if err != nil {
-				Log.Error("RunningService", fmt.Sprintf("设置位置失败: %v", err))
-				application.Get().Event.Emit("running:error", err.Error())
+			// 设置位置（带超时，避免隧道响应慢拖住循环）
+			locationDone := make(chan error, 1)
+			go func() {
+				locationDone <- r.locationService.SetLocation(config.udid, currentPoint.Lat, currentPoint.Lon)
+			}()
+			select {
+			case err := <-locationDone:
+				if err != nil {
+					Log.Error("RunningService", fmt.Sprintf("设置位置失败: %v", err))
+					GlobalEvents.Emit("running:error", err.Error())
+				}
+			case <-time.After(3 * time.Second):
+				Log.Warn("RunningService", "设置位置超时（3s），跳过")
 			}
 
 			// 更新统计信息
@@ -368,15 +425,15 @@ func (r *RunningService) runLoop(ctx context.Context) {
 			r.mu.Unlock()
 
 			// 计算经过的时间
-			var elapsed time.Duration
+			var elapsedDur time.Duration
 			if state != StateIdle {
-				elapsed = time.Since(r.startTime) - r.pausedDuration
+				elapsedDur = time.Since(r.startTime) - r.pausedDuration
 				if state == StatePaused {
-					elapsed -= time.Since(r.lastPauseTime)
+					elapsedDur -= time.Since(r.lastPauseTime)
 				}
 			}
 
-			application.Get().Event.Emit("running:position", RunningStatus{
+			GlobalEvents.Emit("running:position", RunningStatus{
 				State:         state,
 				CurrentLat:    currentPoint.Lat,
 				CurrentLon:    currentPoint.Lon,
@@ -385,7 +442,7 @@ func (r *RunningService) runLoop(ctx context.Context) {
 				CurrentLoop:   currentLoop,
 				CurrentIndex:  pointIndex,
 				TotalPoints:   len(route),
-				ElapsedTimeMs: elapsed.Milliseconds(),
+				ElapsedTimeMs: elapsedDur.Milliseconds(),
 				Progress:      progress,
 			})
 

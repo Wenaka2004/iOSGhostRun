@@ -16,6 +16,44 @@ type LocationService struct {
 	locationServers map[string]*instruments.LocationSimulationService
 }
 
+// getTunneledDevice 获取通过隧道连接的设备（iOS 17+）
+func getTunneledDevice(udid string) (ios.DeviceEntry, error) {
+	device, err := ios.GetDevice(udid)
+	if err != nil {
+		return ios.DeviceEntry{}, fmt.Errorf("获取设备失败: %w", err)
+	}
+
+	info, err := GetTunnelForDevice(udid)
+	if err != nil {
+		return ios.DeviceEntry{}, fmt.Errorf("获取隧道信息失败: %w", err)
+	}
+
+	device.UserspaceTUNPort = info.UserspaceTUNPort
+	device.UserspaceTUNHost = "localhost"
+	device.UserspaceTUN = info.UserspaceTUN
+
+	rsdService, err := ios.NewWithAddrPortDevice(info.Address, info.RsdPort, device)
+	if err != nil {
+		return ios.DeviceEntry{}, fmt.Errorf("连接 RSD 失败: %w", err)
+	}
+	defer rsdService.Close()
+
+	rsdProvider, err := rsdService.Handshake()
+	if err != nil {
+		return ios.DeviceEntry{}, fmt.Errorf("RSD 握手失败: %w", err)
+	}
+
+	tunDevice, err := ios.GetDeviceWithAddress(udid, info.Address, rsdProvider)
+	if err != nil {
+		return ios.DeviceEntry{}, fmt.Errorf("获取隧道设备失败: %w", err)
+	}
+	tunDevice.UserspaceTUN = device.UserspaceTUN
+	tunDevice.UserspaceTUNHost = device.UserspaceTUNHost
+	tunDevice.UserspaceTUNPort = device.UserspaceTUNPort
+
+	return tunDevice, nil
+}
+
 func (l *LocationService) SetLocation(udid string, lat, lon float64) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -24,32 +62,33 @@ func (l *LocationService) SetLocation(udid string, lat, lon float64) error {
 		l.locationServers = make(map[string]*instruments.LocationSimulationService)
 	}
 
+	// iOS 17+ 使用隧道 + instruments 服务
+	if IsVersionAbove17(udid) {
+		server, exists := l.locationServers[udid]
+		if !exists {
+			tunDevice, err := getTunneledDevice(udid)
+			if err != nil {
+				return fmt.Errorf("获取隧道设备失败: %w", err)
+			}
+			server, err = instruments.NewLocationSimulationService(tunDevice)
+			if err != nil {
+				return fmt.Errorf("创建位置模拟服务失败: %w", err)
+			}
+			l.locationServers[udid] = server
+		}
+
+		err := server.StartSimulateLocation(lat, lon)
+		if err != nil {
+			return fmt.Errorf("启动位置模拟失败: %w", err)
+		}
+		return nil
+	}
+
+	// iOS <17 使用旧版 simlocation 服务
 	device, err := ios.GetDevice(udid)
 	if err != nil {
 		return fmt.Errorf("获取设备失败: %w", err)
 	}
-
-	// iOS 17+ 使用 instruments 服务
-	if IsVersionAbove17(udid) {
-		// 检查是否已经有服务实例，没有才创建
-		server, exists := l.locationServers[udid]
-		if !exists {
-			var err error
-			server, err = instruments.NewLocationSimulationService(device)
-			if err != nil {
-				return fmt.Errorf("创建位置模拟服务失败: %w", err)
-			}
-			// 保存服务实例供后续复用
-			l.locationServers[udid] = server
-		}
-
-		// 使用已存在的服务多次定位
-		err = server.StartSimulateLocation(lat, lon)
-		if err != nil {
-			return fmt.Errorf("启动位置模拟失败: %w", err)
-		}
-	}
-
 	err = simlocation.SetLocation(device, fmt.Sprintf("%f", lat), fmt.Sprintf("%f", lon))
 	if err != nil {
 		Log.Error("LocationService", fmt.Sprintf("设置位置失败 for %s: %v", udid, err))
@@ -73,6 +112,13 @@ func (l *LocationService) ResetLocation(udid string) error {
 		delete(l.locationServers, udid)
 	}
 
+	// iOS 17+ 只需要停止 instruments 服务即可
+	if IsVersionAbove17(udid) {
+		Log.Info("LocationService", fmt.Sprintf("设备 %s 位置已重置", udid))
+		return nil
+	}
+
+	// iOS <17 使用旧版 simlocation 重置
 	device, err := ios.GetDevice(udid)
 	if err != nil {
 		return fmt.Errorf("获取设备失败: %w", err)
