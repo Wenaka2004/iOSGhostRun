@@ -272,9 +272,9 @@ chmod +x ~/.shortcuts/GhostRun启动
 
 ```json
 [
-  {"lat": 29.53317, "lon": 106.60334},
-  {"lat": 29.53292, "lon": 106.60329},
-  {"lat": 29.53289, "lon": 106.60344}
+  {"lat": xx.xxxx, "lon": xxx.xxxx},
+  {"lat": xx.xxxx, "lon": xxx.xxxx},
+  {"lat": xx.xxxx, "lon": xxx.xxxx}
 ]
 ```
 
